@@ -17,7 +17,7 @@ const prewarmed = new Set() // difficulties for which background generation was 
 export default function LessonView({ onNavigate }) {
   const app = useApp()
   const { sessionId, currentModule, difficultyLevel, setDifficultyLevel, setCurrentModule, tts, stt,
-    speakAndStore, refreshProgress, toggleHighContrast, setLessonState, speakProgress } = app
+    speakAndStore, refreshProgress, toggleHighContrast, setLessonState, speakProgress, username } = app
   const mod = MODULES.find((m) => m.id === currentModule)
 
   // loading (no card yet) reading paused interrupted answering done error
@@ -309,6 +309,8 @@ export default function LessonView({ onNavigate }) {
         message: question,
         difficulty: diff,
         lesson_context: card ? `${card.title}. ${card.body}` : '',
+        scope: 'lesson',
+        username,
       })
       if (myId !== interruptIdRef.current) return
       let newDiff = null

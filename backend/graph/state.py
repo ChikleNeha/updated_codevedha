@@ -11,6 +11,7 @@ class TutorState(TypedDict, total=False):
     module_title: str
     module_topics: list
     lesson_context: str
+    app_facts: str
     difficulty: str
     updated_difficulty: Optional[str]
     lesson_adjustment: bool

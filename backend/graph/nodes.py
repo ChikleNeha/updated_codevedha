@@ -26,6 +26,7 @@ async def tutor_node(state: TutorState) -> dict:
         difficulty=difficulty,
         level_style=LEVEL_STYLES.get(difficulty, LEVEL_STYLES["beginner"]),
         lesson_context=(state.get("lesson_context") or "(none)")[:1500],
+        app_facts=state.get("app_facts") or "(none)",
     )
     history = [
         {"role": "user" if m.type == "human" else "assistant", "content": m.content}

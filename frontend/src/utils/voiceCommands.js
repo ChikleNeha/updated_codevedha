@@ -44,6 +44,30 @@ export function parseModuleJump(text, { strict = false, titles = true } = {}) {
   return null
 }
 
+// Questions about the learner's own progress, modules, time or level. The server answers these from real data.
+const TIME_Q = /\b(how long|how much time|how many (minutes|hours)|time (is )?(left|remaining|required|needed)|how soon|duration|time (will|does|is) it (take|going))\b/
+const PY_TERMS = /\b(string|list|array|tuple|word|text|variable|name|loop|range|function|dictionary|number|sentence|file)\b/
+const APP_WORDS = /\b(module|modules|course|lesson|chapter|finish|learn|me|my)\b/
+const APP_QUESTIONS = [
+  /\b(modules?|chapters?|lessons?|topics?)\b.*\b(left|remaining|remain|to go|pending|incomplete)\b/,
+  /\bhow many (more )?(modules?|chapters?|lessons?|topics?)\b/,
+  /\bwhat('?s| is| are) (left|remaining|next)\b/,
+  /\bwhat should i (do|learn|study) next\b/,
+  /\bquiz(zes)?\b.*\b(score|taken|attempts?|best|last)\b|\bhow many quiz/,
+  /\b(progress|how am i doing|how far|how many (modules? |chapters? )?(have i|did i)|my (scores?|results?)|average score|how well)\b/,
+  /\b(which|what) (module|chapter|lesson|topic)( am i| are we| is this)?\b|\bwhere am i\b/,
+  /\b(my level|what level|which level|current (level|difficulty))\b/,
+  /\bwhat('?s| is) my name\b|\bwho am i\b/,
+  /\b(what can you do|who are you)\b/,
+]
+
+export function isAppQuestion(text) {
+  const t = norm(text)
+  if (!t) return false
+  if (TIME_Q.test(t) && !(PY_TERMS.test(t) && !APP_WORDS.test(t))) return true
+  return APP_QUESTIONS.some((re) => re.test(t))
+}
+
 // Lesson commands. Short phrases always count. Longer phrases count when they contain a
 // navigation verb, so "please move to the quiz page" works but "how do I write a quiz in code" does not.
 // Returns a command name, 'goto:<module number>', or null.
@@ -53,6 +77,7 @@ export function parseCommand(text, { titles = true } = {}) {
   const n = t.split(' ').length
   const nav = NAV_VERB.test(t)
   if (n > (nav ? 9 : 5)) return null
+  if (/\bwhat('?s| is)? next\b|\bwhat should i\b/.test(t)) return null
   if (!/\b(quiz|test)\b/.test(t)) {
     const jump = parseModuleJump(t, { titles })
     if (jump !== null) return `goto:${jump}`
@@ -151,6 +176,7 @@ export function interpretQuizSpeech(text, options) {
   if (jump !== null) return { type: 'command', cmd: `goto:${jump}` }
   if (/\b(next|previous)\b.*\b(module|chapter)\b/.test(t)) return { type: 'command', cmd: /next/.test(t) ? 'next' : 'previous' }
   if (/\b(progress|how am i doing|my scores?)\b/.test(t)) return { type: 'command', cmd: 'progress' }
+  if (isAppQuestion(t)) return { type: 'ask' }
   if (/\b(repeat|again|replay|pardon|say that|read (it|that|the question)|once more|what was|didn't (hear|get))\b/.test(t))
     return { type: 'repeat' }
   const idx = letterIndex(t)

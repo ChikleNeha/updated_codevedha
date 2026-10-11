@@ -56,6 +56,8 @@ class TutorRequest(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
     difficulty: str = "beginner"
     lesson_context: str = ""
+    scope: Literal["lesson", "quiz", "code"] = "lesson"  # quiz: only app questions, no Python teaching
+    username: str = ""
 
 
 class TutorResponse(BaseModel):

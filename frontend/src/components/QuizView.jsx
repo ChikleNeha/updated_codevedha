@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, CheckCircle2, ListChecks, Mic, Play, Repeat, Square, XCircle } from 'lucide-react'
 import { useApp } from '../context/AppContext'
-import { errorMessage, getQuiz, submitQuizResult } from '../utils/api'
+import { chat, errorMessage, getQuiz, submitQuizResult } from '../utils/api'
 import { browserSpeak } from '../utils/browserTTS'
 import { waitUntilDone } from '../hooks/useTTS'
 import { classifyYesNo, interpretQuizSpeech, parseCommand } from '../utils/voiceCommands'
@@ -17,7 +17,7 @@ const BAD_STYLE = { background: '#3a1a1a', border: '1px solid #7a2e2e', color: '
 
 export default function QuizView({ onNavigate, onCommand }) {
   const { sessionId, currentModule, difficultyLevel, setDifficultyLevel, tts, stt, speakAndStore,
-    refreshProgress, setLessonState } = useApp()
+    refreshProgress, setLessonState, username } = useApp()
   const mod = MODULES.find((m) => m.id === currentModule)
 
   // idle loading asking feedback waiting done
@@ -28,6 +28,7 @@ export default function QuizView({ onNavigate, onCommand }) {
   const [feedback, setFeedback] = useState(null)
   const [summary, setSummary] = useState('')
   const [listening, setListening] = useState(false)
+  const [note, setNote] = useState('') // the last answer to a question about progress, time or modules
 
   const stateRef = useRef('idle')
   const questionsRef = useRef([])
@@ -60,6 +61,20 @@ export default function QuizView({ onNavigate, onCommand }) {
     const r = await stt.listen(opts)
     setListening(false)
     return r
+  }
+
+  // Questions about progress, modules or time. Python questions wait until the lesson (scope quiz).
+  const askAssistant = async (text) => {
+    try {
+      const { sessionId: sid, currentModule: mid, difficultyLevel: diff } = live.current
+      const res = await chat({
+        session_id: sid, module_id: mid, message: text, difficulty: diff, lesson_context: '',
+        scope: 'quiz', username,
+      })
+      return res.response
+    } catch (e) {
+      return errorMessage(e)
+    }
   }
 
   const speakQuestion = async (i, withHint = false) => {
@@ -106,6 +121,15 @@ export default function QuizView({ onNavigate, onCommand }) {
         onCommand(intent.cmd)
         await sleep(400)
         await waitUntilDone(30000)
+        continue
+      }
+      if (intent.type === 'ask') {
+        const answer = await askAssistant(text)
+        if (run !== runRef.current) return
+        setNote(answer)
+        await say(answer)
+        if (run !== runRef.current) return
+        await speakQuestion(idxRef.current) // then back to the question that was waiting
         continue
       }
       if (intent.type === 'repeat') {
@@ -288,7 +312,11 @@ export default function QuizView({ onNavigate, onCommand }) {
     }
     if (cmd === 'lesson') return onNavigate('lesson')
     if (cmd && cmd !== 'quiz' && onCommand(cmd)) return
-    return say('Sorry, I did not understand that. Press Space to continue.')
+    // not a command: it may be a question about progress, time or modules
+    const answer = await askAssistant(t)
+    if (myId !== runRef.current) return
+    setNote(answer)
+    return say(`${answer} Press Space to continue.`)
   }
 
   useEffect(() => {
@@ -459,6 +487,9 @@ export default function QuizView({ onNavigate, onCommand }) {
                 ))}
               </ul>
               <div role="status" aria-live="polite" className="mt-4">
+                {note && (
+                  <p className="p-3 rounded-md mb-3 border border-line">{note}</p>
+                )}
                 {feedback && (
                   <p className="p-3 rounded-md flex items-start gap-2" style={feedback.ok ? OK_STYLE : BAD_STYLE}>
                     {feedback.ok ? <CheckCircle2 size={20} aria-hidden="true" className="shrink-0 mt-0.5" /> : <XCircle size={20} aria-hidden="true" className="shrink-0 mt-0.5" />}

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, CheckCircle2, Mic, RotateCcw, Send, Terminal, Trash2, XCircle } from 'lucide-react'
 import { useApp } from '../context/AppContext'
-import { errorMessage, runCode } from '../utils/api'
+import { chat, errorMessage, runCode } from '../utils/api'
 import { waitUntilDone } from '../hooks/useTTS'
 import { cleanForSpeech, codeToSpeech } from '../utils/speech'
 import { highlightPython } from '../utils/pyHighlight'
-import { parseCommand } from '../utils/voiceCommands'
+import { isAppQuestion, parseCommand } from '../utils/voiceCommands'
 import { BLOCKED, micProblem } from '../utils/micErrors'
 import { MODULES } from '../data/curriculum'
 
@@ -43,7 +43,7 @@ function Highlighted({ code }) {
 }
 
 export default function CodeView({ onCommand }) {
-  const { currentModule, tts, stt, speakAndStore, setLessonState } = useApp()
+  const { sessionId, currentModule, difficultyLevel, tts, stt, speakAndStore, setLessonState, username } = useApp()
   const mod = MODULES.find((m) => m.id === currentModule)
 
   const [attempts, _setAttempts] = useState([])
@@ -51,6 +51,7 @@ export default function CodeView({ onCommand }) {
   const [typed, setTyped] = useState('')
   const [notice, setNotice] = useState('') // a visible message for anything that goes wrong with the microphone
   const [slow, setSlow] = useState(false)
+  const [note, setNote] = useState('') // the last answer to a question about progress, time or modules
 
   const attemptsRef = useRef([])
   const statusRef = useRef('idle')
@@ -121,6 +122,22 @@ export default function CodeView({ onCommand }) {
     }
   }
 
+  // Questions about progress, modules or time are answered, not turned into code.
+  const askAssistant = async (text) => {
+    try {
+      const res = await chat({
+        session_id: sessionId, module_id: currentModule, message: text, difficulty: difficultyLevel,
+        lesson_context: '', scope: 'code', username,
+      })
+      setNote(res.response)
+      return res.response
+    } catch (e) {
+      const msg = errorMessage(e)
+      setNote(msg)
+      return msg
+    }
+  }
+
   const handleSpoken = async (text) => {
     // Short phrases can be commands. Module names are ordinary words when describing code, so no title jumps here.
     const cmd = parseCommand(text, { titles: false })
@@ -129,6 +146,12 @@ export default function CodeView({ onCommand }) {
     if (/\b(clear|delete|erase)\b.*\b(history|everything|all)\b/i.test(text)) return clearHistory()
     if (cmd && (PAGE_COMMANDS.includes(cmd) || cmd.startsWith('goto:'))) {
       if (onCommand(cmd)) return
+    }
+    if (isAppQuestion(text)) {
+      setStatus('running')
+      const answer = await askAssistant(text)
+      setStatus('idle')
+      return say(`${answer} Press Space to write more code.`)
     }
     return submit(text)
   }
@@ -194,7 +217,11 @@ export default function CodeView({ onCommand }) {
     }
     if (cmd === 'stop' || cmd === 'resume' || cmd === 'code') return
     if (cmd && onCommand(cmd)) return
-    return say('Sorry, I did not understand that command. Press Space to write code, or say help.')
+    // not a command: it may be a question about progress, time or modules
+    setStatus('running')
+    const answer = await askAssistant(text)
+    setStatus('idle')
+    return say(`${answer} Press Space to write code.`)
   }
 
   const actionsRef = useRef({})
@@ -309,6 +336,7 @@ export default function CodeView({ onCommand }) {
       {notice && (
         <p role="alert" className="mx-6 md:mx-8 mt-3 p-3 rounded-md text-sm" style={BAD_STYLE}>{notice}</p>
       )}
+      {note && <p className="mx-6 md:mx-8 mt-3 p-3 rounded-md text-sm border border-line">{note}</p>}
 
       <div className="flex-1 min-h-0 px-6 md:px-8 py-4">
         <div className="h-full overflow-y-auto rounded-lg border border-line bg-surface px-5 py-4">

@@ -18,9 +18,9 @@ const TABS = [
 
 // What you can say on each page, shown on screen for people who can see.
 const HINTS = {
-  lesson: 'Say: replay, next module, module 3, quiz, code, progress, help. Press J to ask a question.',
-  quiz: 'Say: A, B, C or D, repeat, stop the quiz, lesson, module 3, progress. Press J for commands.',
-  code: 'Press Space and describe code. Say: repeat, clear history, lesson, quiz, module 3. Press J for commands.',
+  lesson: 'Say: replay, next module, module 3, quiz, code, help. Ask: how many modules are left? how much time is left? Press J to ask.',
+  quiz: 'Say: A, B, C or D, repeat, stop the quiz, lesson, module 3. You can also ask: how many modules are left? Press J for commands.',
+  code: 'Press Space and describe code. Say: repeat, clear history, lesson, quiz, module 3. Ask: what is my progress? Press J for commands.',
 }
 
 // States in which pressing P (progress summary) will not talk over anything.
