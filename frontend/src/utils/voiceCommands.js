@@ -5,20 +5,66 @@ const norm = (text) =>
     .replace(/\s+/g, ' ')
     .trim()
 
+const NAV_VERB = /\b(go|move|switch|take|open|show|start|begin|navigate|jump|lets|let's|want|please)\b/
+const QUESTION_WORD = /\b(what|how|why|explain|tell|when|which|is|are|does|do)\b/
+const WORD_NUM = {
+  one: 1, two: 2, three: 3, four: 4, five: 5,
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5,
+}
+const TITLE_HINTS = [
+  [/\b(variables?|print)\b/, 1],
+  [/\bdata types?\b/, 2],
+  [/\b(conditionals?|conditions)\b/, 3],
+  [/\bloops?\b/, 4],
+  [/\bfunctions?\b/, 5],
+]
+
+function toNumber(word) {
+  if (/^\d+$/.test(word)) return Number(word)
+  if (word === 'to' || word === 'too') return 2 // "module to" is almost always "module two"
+  if (word === 'for') return 4
+  return WORD_NUM[word]
+}
+
+// "go to module 3", "chapter two", "open loops". Returns a module number, or null.
+//   strict: only "module or chapter + number" and "navigation verb + module title" count.
+//   titles: set false where module names are ordinary words (for example when describing code).
+export function parseModuleJump(text, { strict = false, titles = true } = {}) {
+  const t = norm(text)
+  if (!t) return null
+  const withNumber = t.match(/\b(?:module|chapter)\s+(?:number\s+)?(\d+|one|two|too|to|three|four|for|five|first|second|third|fourth|fifth)\b/)
+  if (withNumber) return toNumber(withNumber[1]) ?? null
+  if (!strict) {
+    const loose = t.match(/\b(?:lesson|topic)\s+(?:number\s+)?(\d+|one|two|three|four|five|first|second|third|fourth|fifth)\b/)
+    if (loose) return toNumber(loose[1]) ?? null
+  }
+  if (titles && NAV_VERB.test(t) && !QUESTION_WORD.test(t) && t.split(' ').length <= 8) {
+    for (const [re, n] of TITLE_HINTS) if (re.test(t)) return n
+  }
+  return null
+}
+
 // Lesson commands. Short phrases always count. Longer phrases count when they contain a
 // navigation verb, so "please move to the quiz page" works but "how do I write a quiz in code" does not.
-export function parseCommand(text) {
+// Returns a command name, 'goto:<module number>', or null.
+export function parseCommand(text, { titles = true } = {}) {
   const t = norm(text)
   if (!t) return null
   const n = t.split(' ').length
-  const nav = /\b(go|move|switch|take|open|show|start|begin|navigate|jump|lets|let's|want|please)\b/.test(t)
+  const nav = NAV_VERB.test(t)
   if (n > (nav ? 9 : 5)) return null
+  if (!/\b(quiz|test)\b/.test(t)) {
+    const jump = parseModuleJump(t, { titles })
+    if (jump !== null) return `goto:${jump}`
+  }
   if (/\b(restart|start over|from the beginning)\b/.test(t)) return 'restart'
   if (/\b(replay|repeat|again)\b/.test(t)) return 'replay'
+  if (/\b(progress|how am i doing|my scores?|my results?)\b/.test(t)) return 'progress'
   if (/\b(quiz|test)\b/.test(t)) return 'quiz'
+  if (/\b(go|move|back|return|open|switch|take)\b.*\blesson\b|\blesson (page|tab)\b|^lesson$/.test(t)) return 'lesson'
   if (/\b(code|coding|practice)\b/.test(t)) return 'code'
   if (/\bnext\b/.test(t)) return 'next'
-  if (/\b(back to|return to)\b.*\blesson\b|\b(continue|resume|carry on|go on|keep going)\b|^lesson$/.test(t)) return 'resume'
+  if (/\b(continue|resume|carry on|go on|keep going)\b/.test(t)) return 'resume'
   if (/\b(previous|go back)\b/.test(t)) return 'previous'
   if (/\bhelp\b/.test(t)) return 'help'
   if (/\bcontrast\b/.test(t)) return 'contrast'
@@ -100,6 +146,11 @@ export function interpretQuizSpeech(text, options) {
     return { type: 'stop' }
   if (/\b(go|back|return|move|switch|open)\b.*\blesson\b|\blesson (page|tab)\b/.test(t)) return { type: 'nav', to: 'lesson' }
   if (/\b(go|move|switch|open)\b.*\bcode\b/.test(t)) return { type: 'nav', to: 'code' }
+  // "number three" is option C in a quiz, so module jumps here need the word module or chapter
+  const jump = parseModuleJump(t, { strict: true })
+  if (jump !== null) return { type: 'command', cmd: `goto:${jump}` }
+  if (/\b(next|previous)\b.*\b(module|chapter)\b/.test(t)) return { type: 'command', cmd: /next/.test(t) ? 'next' : 'previous' }
+  if (/\b(progress|how am i doing|my scores?)\b/.test(t)) return { type: 'command', cmd: 'progress' }
   if (/\b(repeat|again|replay|pardon|say that|read (it|that|the question)|once more|what was|didn't (hear|get))\b/.test(t))
     return { type: 'repeat' }
   const idx = letterIndex(t)

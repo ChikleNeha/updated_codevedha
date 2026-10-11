@@ -1,22 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowDown, ArrowUp, Mic, Pause, Play, RotateCcw, Send } from 'lucide-react'
 import { useApp } from '../context/AppContext'
-import { chat, errorMessage, prewarmLessons, streamLesson, updateProgress } from '../utils/api'
+import { chat, errorMessage, getCachedLesson, prewarmLessons, streamLesson, updateProgress } from '../utils/api'
 import { browserSpeak, browserStop } from '../utils/browserTTS'
 import { waitUntilDone } from '../hooks/useTTS'
 import { draftText, parseCards, parseCardsPartial, plain, speechOf, splitBody } from '../utils/speech'
 import { classifySubmit, classifyYesNo, parseCommand } from '../utils/voiceCommands'
-import { DIFFICULTY_LABELS, MODULES, SHORTCUTS, VOICE_COMMANDS } from '../data/curriculum'
+import { BLOCKED, micProblem } from '../utils/micErrors'
+import { DIFFICULTY_LABELS, LEVEL_ORDER, MODULES, SHORTCUTS, VOICE_COMMANDS } from '../data/curriculum'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const LESSON_RATE = 0.95
-const BLOCKED = ['not-allowed', 'service-not-allowed', 'not-supported', 'start-failed']
 const resumeMap = {} // moduleId -> card index, so leaving and returning keeps your place
 const prewarmed = new Set() // difficulties for which background generation was already requested
 
 export default function LessonView({ onNavigate }) {
   const app = useApp()
   const { sessionId, currentModule, difficultyLevel, setDifficultyLevel, setCurrentModule, tts, stt,
-    speakAndStore, refreshProgress, toggleHighContrast, setLessonState } = app
+    speakAndStore, refreshProgress, toggleHighContrast, setLessonState, speakProgress } = app
   const mod = MODULES.find((m) => m.id === currentModule)
 
   // loading (no card yet) reading paused interrupted answering done error
@@ -57,7 +58,7 @@ export default function LessonView({ onNavigate }) {
     isListeningRef.current = v
     _setListening(v)
   }
-  const addChat = (role, msg) => setChatLog((l) => [...l, { role, text: msg }])
+  const addChat = (role, msg, dir) => setChatLog((l) => [...l, { role, text: msg, dir }])
 
   useEffect(() => {
     requestAnimationFrame(() => {
@@ -83,9 +84,10 @@ export default function LessonView({ onNavigate }) {
     return r
   }
 
-  const micBlocked = async () => {
-    addChat('system', 'The microphone is not available. Type your question instead.')
-    await tts.speak('The microphone is not available. Please type your question in the box.')
+  const micBlocked = async (reason) => {
+    const why = micProblem(reason) || 'The microphone is not available.'
+    addChat('system', `${why} You can type your question instead.`)
+    await tts.speak(`${why} You can type your question in the box.`)
     inputRef.current?.focus()
   }
 
@@ -157,74 +159,93 @@ export default function LessonView({ onNavigate }) {
     setDraft('')
     setGenerating(true)
     setStatus('loading')
-    setStatusMsg('Getting your lesson ready.')
+    setStatusMsg('')
     updateProgress({ session_id: sid, module_id: mid, status: 'in_progress' }).then(refreshProgress).catch(() => {})
 
     let spoke = false
-    cancelStreamRef.current = streamLesson(
-      { sessionId: sid, moduleId: mid, difficulty, force },
-      {
-        onStatus: (msg) => {
-          setStatusMsg(msg)
-          if (!spoke) {
-            spoke = true
-            browserSpeak(msg)
-          }
-        },
-        onChunk: (piece) => {
-          rawRef.current += piece
-          const { complete, draft: d } = parseCardsPartial(rawRef.current)
-          if (complete.length !== cardsRef.current.length) {
-            cardsRef.current = complete
-            setCards(complete)
-          }
-          setDraft(draftText(d))
-          if (!startedRef.current && complete.length >= 1) {
-            startedRef.current = true
-            readFrom(0)
-          }
-        },
-        onDone: (content) => {
-          const list = parseCards(content)
-          if (!list.length) {
-            streamDoneRef.current = true
-            setGenerating(false)
-            setStatus('error')
-            setStatusMsg('The lesson came back empty. Press Space to try again.')
-            tts.speak('The lesson came back empty. Press Space to try again.')
-            return
-          }
-          cardsRef.current = list
-          setCards(list)
-          setDraft('')
-          setGenerating(false)
+    const handlers = {
+      onStatus: (msg) => {
+        setStatusMsg(msg)
+        if (!spoke) {
+          spoke = true
+          browserSpeak(msg)
+        }
+      },
+      onChunk: (piece) => {
+        rawRef.current += piece
+        const { complete, draft: d } = parseCardsPartial(rawRef.current)
+        if (complete.length !== cardsRef.current.length) {
+          cardsRef.current = complete
+          setCards(complete)
+        }
+        setDraft(draftText(d))
+        if (!startedRef.current && complete.length >= 1) {
+          startedRef.current = true
+          readFrom(0)
+        }
+      },
+      onDone: (content) => {
+        const list = parseCards(content)
+        if (!list.length) {
           streamDoneRef.current = true
-          if (!startedRef.current) {
-            startedRef.current = true
-            const saved = resumeMap[mid] || 0
-            readFrom(saved < list.length ? saved : 0)
-          }
-          // once the first lesson exists, write every other lesson in the background
-          if (!prewarmed.has(difficulty)) {
-            prewarmed.add(difficulty)
-            prewarmLessons({
-              sessionId: sid,
-              difficulty,
-              moduleIds: MODULES.map((m) => m.id).filter((id) => id !== mid),
-            }).catch(() => prewarmed.delete(difficulty))
-          }
-        },
-        onError: (msg) => {
           setGenerating(false)
-          streamDoneRef.current = true
-          runIdRef.current++
-          tts.stop()
           setStatus('error')
-          setStatusMsg(msg)
-          tts.speak(`${msg} Press Space to try again.`)
-        },
-      }
-    )
+          setStatusMsg('The lesson came back empty. Press Space to try again.')
+          tts.speak('The lesson came back empty. Press Space to try again.')
+          return
+        }
+        cardsRef.current = list
+        setCards(list)
+        setDraft('')
+        setGenerating(false)
+        streamDoneRef.current = true
+        if (!startedRef.current) {
+          startedRef.current = true
+          const saved = resumeMap[mid] || 0
+          readFrom(saved < list.length ? saved : 0)
+        }
+        // once the first lesson exists, write every other lesson in the background
+        if (!prewarmed.has(difficulty)) {
+          prewarmed.add(difficulty)
+          prewarmLessons({
+            sessionId: sid,
+            difficulty,
+            moduleIds: MODULES.map((m) => m.id).filter((id) => id !== mid),
+          }).catch(() => prewarmed.delete(difficulty))
+        }
+      },
+      onError: (msg) => {
+        setGenerating(false)
+        streamDoneRef.current = true
+        runIdRef.current++
+        tts.stop()
+        setStatus('error')
+        setStatusMsg(msg)
+        tts.speak(`${msg} Press Space to try again.`)
+      },
+    }
+
+    let cancelled = false
+    let cancelInner = null
+    cancelStreamRef.current = () => {
+      cancelled = true
+      cancelInner?.()
+    }
+    const stream = () => {
+      if (!cancelled) cancelInner = streamLesson({ sessionId: sid, moduleId: mid, difficulty, force }, handlers)
+    }
+    if (force) {
+      stream()
+    } else {
+      // A lesson that is already written needs no stream: it appears and starts reading at once.
+      getCachedLesson({ moduleId: mid, difficulty })
+        .then((res) => {
+          if (cancelled) return
+          if (res?.cached && res.content) handlers.onDone(res.content, true)
+          else stream()
+        })
+        .catch(stream)
+    }
   }, [readFrom, refreshProgress, tts.speak, tts.stop, setLessonState])
 
   useEffect(() => {
@@ -258,7 +279,7 @@ export default function LessonView({ onNavigate }) {
     if (myId !== interruptIdRef.current) return
     const r = await listenTurn({ silenceMs: 1300, maxWaitMs: 7000 })
     if (myId !== interruptIdRef.current || r.error === 'cancelled') return
-    if (BLOCKED.includes(r.error)) return micBlocked()
+    if (BLOCKED.includes(r.error)) return micBlocked(r.error)
     const text = r.text.trim()
     if (!text) {
       setStatus('paused')
@@ -290,19 +311,20 @@ export default function LessonView({ onNavigate }) {
         lesson_context: card ? `${card.title}. ${card.body}` : '',
       })
       if (myId !== interruptIdRef.current) return
-      let spoken = res.response
       let newDiff = null
-      if (res.updated_difficulty && res.updated_difficulty !== diff) {
-        newDiff = res.updated_difficulty
-        const label = DIFFICULTY_LABELS[newDiff]
-        setDifficultyLevel(newDiff)
-        addChat('system', `Difficulty changed to ${label}`)
-        spoken += ` I have changed your level to ${label}.`
-      }
       addChat('assistant', res.response)
-      await tts.speak(spoken)
+      await tts.speak(res.response)
       await waitUntilDone(60000)
       if (myId !== interruptIdRef.current) return
+      if (res.updated_difficulty && res.updated_difficulty !== diff) {
+        newDiff = res.updated_difficulty
+        const up = LEVEL_ORDER.indexOf(newDiff) > LEVEL_ORDER.indexOf(diff)
+        addChat('system', `Difficulty ${up ? 'increased' : 'decreased'}: ${DIFFICULTY_LABELS[newDiff]}`, up ? 'up' : 'down')
+        setDifficultyLevel(newDiff) // the app announces the new level aloud
+        await sleep(300)
+        await waitUntilDone(10000)
+        if (myId !== interruptIdRef.current) return
+      }
       if (res.intent === 'quiz') return onNavigate('quiz')
       if (res.lesson_adjust) {
         setPanelOpen(false)
@@ -324,7 +346,25 @@ export default function LessonView({ onNavigate }) {
   const runCommand = async (cmd, spokenText, myId) => {
     addChat('user', spokenText)
     const mid = live.current.currentModule
+    if (cmd.startsWith('goto:')) {
+      const n = Number(cmd.slice(5))
+      const m = MODULES.find((x) => x.id === n)
+      if (!m || n === mid) {
+        await say(m ? `You are already on module ${n}.` : `There is no module ${n}. The modules are numbered one to ${MODULES.length}.`)
+        return askToContinue(myId)
+      }
+      speakAndStore(`Module ${m.id}. ${m.title}.`)
+      setPanelOpen(false)
+      return setCurrentModule(m.id)
+    }
+    if (cmd === 'progress') {
+      await speakProgress()
+      await waitUntilDone(30000)
+      await sleep(400)
+      return askToContinue(myId)
+    }
     switch (cmd) {
+      case 'lesson':
       case 'replay':
       case 'resume':
         return resumeLesson()
@@ -377,7 +417,7 @@ export default function LessonView({ onNavigate }) {
         if (!heard) {
           const r = await listenTurn({ silenceMs: 2200, maxWaitMs: 9000 })
           if (myId !== interruptIdRef.current || r.error === 'cancelled') return
-          if (BLOCKED.includes(r.error)) return micBlocked()
+          if (BLOCKED.includes(r.error)) return micBlocked(r.error)
           heard = r.text.trim()
         }
         if (!heard && !pending) {
@@ -484,6 +524,14 @@ export default function LessonView({ onNavigate }) {
   }
   const interruptRef = useRef(interrupt)
   interruptRef.current = interrupt
+
+  useEffect(() => {
+    const onInterrupt = () => {
+      if (!isListeningRef.current) interruptRef.current()
+    }
+    window.addEventListener('codevedha:interrupt', onInterrupt)
+    return () => window.removeEventListener('codevedha:interrupt', onInterrupt)
+  }, [])
   const primaryRef = useRef(primary)
   primaryRef.current = primary
 
@@ -528,15 +576,17 @@ export default function LessonView({ onNavigate }) {
   return (
     <section aria-label="Lesson" className="h-full flex flex-col min-h-0">
       <div className="shrink-0 px-6 md:px-8 pt-4 flex flex-wrap items-center gap-3">
-        <button type="button" className="btn-ghost" aria-label="Interrupt and ask a question. Shortcut J or F" onClick={() => interrupt()}>
+        <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Interrupt and ask a question. Shortcut J or F" onClick={() => interrupt()}>
+          <Mic size={18} aria-hidden="true" />
           Ask a question (J)
         </button>
         <button
           type="button"
-          className="btn-ghost"
-          aria-label={status === 'reading' ? 'Pause the lesson' : 'Resume the lesson'}
+          className="btn-ghost flex items-center gap-2"
+          aria-label={status === 'reading' ? 'Pause the lesson' : status === 'done' ? 'Hear the lesson again' : 'Resume the lesson'}
           onClick={() => primary()}
         >
+          {status === 'reading' ? <Pause size={18} aria-hidden="true" /> : status === 'done' ? <RotateCcw size={18} aria-hidden="true" /> : <Play size={18} aria-hidden="true" />}
           {status === 'reading' ? 'Pause' : status === 'done' ? 'Hear again' : 'Resume'}
         </button>
         <p role="status" aria-live="polite" className="text-muted text-sm ml-1">{statusText}</p>
@@ -588,10 +638,18 @@ export default function LessonView({ onNavigate }) {
         >
           <div ref={logRef} role="log" aria-live="polite" aria-label="Conversation" className="flex-1 min-h-[2.5rem] overflow-y-auto space-y-1 text-base">
             {chatLog.map((m, i) => (
-              <p key={i} className={m.role === 'user' ? 'text-muted' : m.role === 'system' ? 'text-sm italic' : ''}>
-                {m.role === 'user' ? 'You: ' : m.role === 'assistant' ? 'Tutor: ' : ''}
-                {m.text}
-              </p>
+              m.role === 'system' ? (
+                <p key={i} className="text-sm inline-flex items-center gap-2 px-3 py-1 rounded-full border border-line">
+                  {m.dir === 'up' && <ArrowUp size={14} aria-hidden="true" />}
+                  {m.dir === 'down' && <ArrowDown size={14} aria-hidden="true" />}
+                  {m.text}
+                </p>
+              ) : (
+                <p key={i} className={m.role === 'user' ? 'text-muted' : ''}>
+                  {m.role === 'user' ? 'You: ' : 'Tutor: '}
+                  {m.text}
+                </p>
+              )
             ))}
           </div>
           <form onSubmit={submitTyped} className="flex gap-2 flex-wrap">
@@ -604,16 +662,21 @@ export default function LessonView({ onNavigate }) {
               placeholder="Or type here"
               className="flex-1 min-w-[10rem] min-h-[44px] px-3 rounded-md bg-bg border border-line text-ink"
             />
-            <button type="submit" className="btn-primary" aria-label="Send typed question">Send</button>
+            <button type="submit" className="btn-primary flex items-center gap-2" aria-label="Send typed question">
+              <Send size={18} aria-hidden="true" />
+              Send
+            </button>
             <button
               type="button"
-              className={`btn-ghost ${listening ? 'listening-pulse' : ''}`}
+              className={`btn-ghost flex items-center gap-2 ${listening ? 'listening-pulse' : ''}`}
               aria-label={listening ? 'Finish speaking' : 'Start speaking'}
               onClick={() => (listening ? stt.stopListening() : startDialog())}
             >
+              <Mic size={18} aria-hidden="true" />
               {listening ? 'Done' : 'Speak'}
             </button>
-            <button type="button" className="btn-ghost" aria-label="Close and resume the lesson" onClick={() => { pauseLesson(); resumeLesson() }}>
+            <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Close and resume the lesson" onClick={() => { pauseLesson(); resumeLesson() }}>
+              <Play size={18} aria-hidden="true" />
               Resume
             </button>
           </form>

@@ -10,6 +10,7 @@ from models.schemas import LessonRequest, LessonResponse, PrewarmRequest
 from services.curriculum import require_module
 from services.difficulty import LEVELS
 from services.llm import LLMUnavailable, chat, stream_chat
+from services.priority import busy, interactive, wait_until_idle
 from services.prompts import LEVEL_STYLES, LESSON_SYSTEM
 
 router = APIRouter()
@@ -67,6 +68,14 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+@router.get("/lesson/cached")
+async def lesson_cached(module_id: int, difficulty: str = "beginner"):
+    """Instant answer for the browser: is this lesson already written? No streaming involved."""
+    require_module(module_id)
+    content = await get_cached(module_id, _ckey(_level(difficulty)))
+    return {"cached": bool(content), "content": content or ""}
+
+
 @router.post("/lesson/stream")
 async def lesson_stream(req: LessonRequest):
     module = require_module(req.module_id)
@@ -95,9 +104,10 @@ async def lesson_stream(req: LessonRequest):
             yield _sse("status", {"message": "Writing your lesson. This takes a few seconds."})
             parts: list[str] = []
             try:
-                async for piece in stream_chat(_messages(module, difficulty)):
-                    parts.append(piece)
-                    yield _sse("chunk", {"text": piece})
+                async with interactive():  # the learner is waiting, so background writing pauses
+                    async for piece in stream_chat(_messages(module, difficulty)):
+                        parts.append(piece)
+                        yield _sse("chunk", {"text": piece})
             except LLMUnavailable as e:
                 yield _sse("error", {"message": str(e)})
                 return
@@ -129,11 +139,32 @@ async def lesson(req: LessonRequest):
         if cached:
             return LessonResponse(module_id=req.module_id, difficulty=difficulty, content=cached, cached=True)
     try:
-        content = (await chat(_messages(module, difficulty))).strip()
+        async with interactive():
+            content = (await chat(_messages(module, difficulty))).strip()
     except LLMUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e))
     await save_lesson(req.module_id, ckey, content)
     return LessonResponse(module_id=req.module_id, difficulty=difficulty, content=content, cached=False)
+
+
+async def _chat_politely(messages: list[dict]) -> str:
+    """Background generation that stops as soon as the learner asks for something, then starts again when idle."""
+    while True:
+        await wait_until_idle()
+        task = asyncio.create_task(chat(messages))
+        try:
+            while not task.done() and not busy():
+                await asyncio.sleep(0.25)
+            if task.done():
+                return task.result()
+            task.cancel()  # the learner needs the model now
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        finally:
+            if not task.done():
+                task.cancel()
 
 
 async def _prewarm(module_ids: list[int], difficulty: str) -> None:
@@ -146,7 +177,7 @@ async def _prewarm(module_ids: list[int], difficulty: str) -> None:
         event = asyncio.Event()
         _inflight[flight] = event
         try:
-            content = (await chat(_messages(module, difficulty))).strip()
+            content = (await _chat_politely(_messages(module, difficulty))).strip()
             if content:
                 await save_lesson(module_id, ckey, content)
         except LLMUnavailable:

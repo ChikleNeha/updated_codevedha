@@ -13,6 +13,10 @@ export const getLesson = ({ sessionId, moduleId, difficulty, force = false }) =>
     .post('/lesson', { session_id: sessionId, module_id: moduleId, difficulty, force })
     .then((r) => r.data)
 
+// Instant check, no streaming: has this lesson already been written?
+export const getCachedLesson = ({ moduleId, difficulty }) =>
+  http.get('/lesson/cached', { params: { module_id: moduleId, difficulty } }).then((r) => r.data)
+
 export const prewarmLessons = ({ sessionId, difficulty, moduleIds = [2, 3, 4, 5] }) =>
   http
     .post('/lesson/prewarm', { session_id: sessionId, difficulty, module_ids: moduleIds })

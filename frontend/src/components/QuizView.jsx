@@ -1,21 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { ArrowLeft, CheckCircle2, ListChecks, Mic, Play, Repeat, Square, XCircle } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import { errorMessage, getQuiz, submitQuizResult } from '../utils/api'
 import { browserSpeak } from '../utils/browserTTS'
 import { waitUntilDone } from '../hooks/useTTS'
-import { interpretQuizSpeech } from '../utils/voiceCommands'
+import { classifyYesNo, interpretQuizSpeech, parseCommand } from '../utils/voiceCommands'
+import { BLOCKED, micProblem } from '../utils/micErrors'
 import { DIFFICULTY_LABELS, MODULES } from '../data/curriculum'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const LETTERS = ['A', 'B', 'C', 'D']
 const KEY_TO_INDEX = { a: 0, b: 1, c: 2, d: 3, 1: 0, 2: 1, 3: 2, 4: 3 }
-const BLOCKED = ['not-allowed', 'service-not-allowed', 'not-supported', 'start-failed']
 
 const OK_STYLE = { background: '#16301f', border: '1px solid #2f6b43', color: '#b7f0c6' }
 const BAD_STYLE = { background: '#3a1a1a', border: '1px solid #7a2e2e', color: '#ffc9c9' }
 
-export default function QuizView({ onNavigate }) {
-  const { sessionId, currentModule, difficultyLevel, setDifficultyLevel, tts, stt, speakAndStore, refreshProgress } = useApp()
+export default function QuizView({ onNavigate, onCommand }) {
+  const { sessionId, currentModule, difficultyLevel, setDifficultyLevel, tts, stt, speakAndStore,
+    refreshProgress, setLessonState } = useApp()
   const mod = MODULES.find((m) => m.id === currentModule)
 
   // idle loading asking feedback waiting done
@@ -38,7 +40,11 @@ export default function QuizView({ onNavigate }) {
   const live = useRef({})
   live.current = { sessionId, currentModule, difficultyLevel }
 
-  const setState = (v) => { stateRef.current = v; _setState(v) }
+  const setState = (v) => {
+    stateRef.current = v
+    _setState(v)
+    setLessonState(v)
+  }
   const setQuestions = (v) => { questionsRef.current = v; _setQuestions(v) }
   const setIdx = (v) => { idxRef.current = v; _setIdx(v) }
   const setScore = (v) => { scoreRef.current = v; _setScore(v) }
@@ -64,7 +70,7 @@ export default function QuizView({ onNavigate }) {
     await say(`Question ${i + 1} of ${questionsRef.current.length}. ${q.question}. ${opts}${hint}`)
   }
 
-  // After a question is read, the microphone opens and decides: answer, repeat, stop or unclear.
+  // After a question is read, the microphone opens and decides: answer, repeat, stop, or a page command.
   const answerLoop = async (run) => {
     let silences = 0
     let unclear = 0
@@ -73,7 +79,7 @@ export default function QuizView({ onNavigate }) {
       const r = await listenTurn({ silenceMs: 1300, maxWaitMs: 8000 })
       if (run !== runRef.current || r.error === 'cancelled') return
       if (BLOCKED.includes(r.error)) {
-        await say('I cannot use the microphone. Press A, B, C or D to answer.')
+        await say(`${micProblem(r.error)} You can press A, B, C or D to answer.`)
         return
       }
       const q = questionsRef.current[idxRef.current]
@@ -94,6 +100,14 @@ export default function QuizView({ onNavigate }) {
       if (intent.type === 'answer') return handleAnswer(intent.index)
       if (intent.type === 'stop') return stopQuiz()
       if (intent.type === 'nav') return onNavigate(intent.to)
+      if (intent.type === 'command') {
+        // Moving to another module unmounts this view, which cancels the loop. Anything else
+        // (progress, contrast) is spoken first and then the microphone opens again.
+        onCommand(intent.cmd)
+        await sleep(400)
+        await waitUntilDone(30000)
+        continue
+      }
       if (intent.type === 'repeat') {
         unclear = 0
         await speakQuestion(idxRef.current)
@@ -105,7 +119,7 @@ export default function QuizView({ onNavigate }) {
         await speakQuestion(idxRef.current)
         continue
       }
-      await say("I did not catch that. Say A, B, C or D, or say repeat.")
+      await say('I did not catch that. Say A, B, C or D, or say repeat.')
     }
   }
 
@@ -138,8 +152,8 @@ export default function QuizView({ onNavigate }) {
     if (ok) setScore(scoreRef.current + 1)
     else wrongRef.current.push(q.topic)
     const shown = ok
-      ? `\u2705 You chose option ${LETTERS[choice]}. Correct. ${q.explanation}`
-      : `\u274C You chose option ${LETTERS[choice]}. Wrong. The correct answer is option ${LETTERS[q.correct_index]}, ${q.options[q.correct_index]}. ${q.explanation}`
+      ? `You chose option ${LETTERS[choice]}. Correct. ${q.explanation}`
+      : `You chose option ${LETTERS[choice]}. Wrong. The correct answer is option ${LETTERS[q.correct_index]}, ${q.options[q.correct_index]}. ${q.explanation}`
     setFeedback({ ok, text: shown, chosen: choice })
     tts.stop()
     await sleep(100)
@@ -157,6 +171,13 @@ export default function QuizView({ onNavigate }) {
       if (run !== runRef.current || r.error === 'cancelled') return
       if (BLOCKED.includes(r.error)) return
       const t = r.text.toLowerCase()
+      const cmd = parseCommand(t)
+      if (cmd && cmd !== 'quiz' && onCommand(cmd)) {
+        await sleep(400)
+        await waitUntilDone(30000)
+        if (run !== runRef.current) return
+        continue
+      }
       if (/\b(lesson|back|stop|exit|no|nope)\b/.test(t)) return onNavigate('lesson')
       if (/\bcode\b/.test(t)) return onNavigate('code')
       if (/\b(start|begin|ready|yes|yeah|retake|again|go|ok|okay|sure)\b/.test(t)) return startQuiz()
@@ -182,21 +203,30 @@ export default function QuizView({ onNavigate }) {
     const total = questionsRef.current.length
     const s = scoreRef.current
     let message = `You scored ${s} out of ${total}.`
+    let newLevel = null
     try {
       const { sessionId: sid, currentModule: mid, difficultyLevel: diff } = live.current
       const res = await submitQuizResult({
         session_id: sid, module_id: mid, score: s, total,
         wrong_topics: wrongRef.current, difficulty: diff,
       })
-      if (res.new_difficulty) setDifficultyLevel(res.new_difficulty)
-      message += ` ${res.message}`
+      newLevel = res.new_difficulty
+      // when the level changes, the app announces it itself, so do not repeat it here
+      if (!newLevel) message += ` ${res.message}`
       refreshProgress()
     } catch {
       message += ' I could not save your result.'
     }
     if (!aliveRef.current) return
     setSummary(message)
-    await say(`${message} Say retake to try again, or say lesson to go back to the lesson.`)
+    await say(message)
+    if (newLevel && aliveRef.current) {
+      setDifficultyLevel(newLevel)
+      await sleep(300)
+      await waitUntilDone(10000)
+    }
+    if (!aliveRef.current) return
+    await say('Say retake to try again, or say lesson to go back to the lesson.')
     if (!aliveRef.current) return
     return idleDialog()
   }
@@ -225,6 +255,42 @@ export default function QuizView({ onNavigate }) {
     }
   }
 
+  // J or F: stop talking and listening, then take one spoken command.
+  const interruptQuiz = async () => {
+    if (stateRef.current === 'loading') return
+    const myId = ++runRef.current
+    stt.cancelListening()
+    setListening(false)
+    tts.stop()
+    const inQuiz = ['asking', 'feedback', 'waiting'].includes(stateRef.current)
+    if (inQuiz) setState('waiting') // paused; answeredRef says whether to advance or re-ask
+    await say('What do you want to do?')
+    if (myId !== runRef.current || !aliveRef.current) return
+    const r = await listenTurn({ silenceMs: 1500, maxWaitMs: 8000 })
+    if (myId !== runRef.current || !aliveRef.current || r.error === 'cancelled') return
+    if (BLOCKED.includes(r.error)) return say(`${micProblem(r.error)} Press Space to continue.`)
+    const t = r.text.trim()
+    if (!t) return say('I did not hear a command. Press Space when you are ready.')
+
+    const cmd = parseCommand(t)
+    if (inQuiz) {
+      if (cmd === 'stop' || /\b(end|quit|exit)\b/i.test(t)) return stopQuiz()
+      if (cmd === 'replay') return repeatRef.current()
+      if (cmd === 'resume' || classifyYesNo(t) === 'yes') return primaryRef.current()
+    } else if (cmd === 'quiz' || /\b(start|begin|retake)\b/i.test(t)) {
+      return startQuiz()
+    }
+    if (cmd === 'help') {
+      return say(
+        'During the quiz you can say A, B, C or D, repeat, continue, stop the quiz, lesson, code, ' +
+          'module followed by a number, or progress. Press Space to continue.'
+      )
+    }
+    if (cmd === 'lesson') return onNavigate('lesson')
+    if (cmd && cmd !== 'quiz' && onCommand(cmd)) return
+    return say('Sorry, I did not understand that. Press Space to continue.')
+  }
+
   useEffect(() => {
     aliveRef.current = true
     ;(async () => {
@@ -236,8 +302,15 @@ export default function QuizView({ onNavigate }) {
       runRef.current++
       stt.cancelListening()
       tts.stop()
+      setLessonState('idle')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const onInterrupt = () => interruptRef.current()
+    window.addEventListener('codevedha:interrupt', onInterrupt)
+    return () => window.removeEventListener('codevedha:interrupt', onInterrupt)
   }, [])
 
   // Escape: pause the quiz where it is.
@@ -249,6 +322,7 @@ export default function QuizView({ onNavigate }) {
     }
     window.addEventListener('codevedha:stop', onStop)
     return () => window.removeEventListener('codevedha:stop', onStop)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const primaryRef = useRef(null)
@@ -268,6 +342,8 @@ export default function QuizView({ onNavigate }) {
     stt.cancelListening()
     return runQuestion(idxRef.current)
   }
+  const interruptRef = useRef(null)
+  interruptRef.current = interruptQuiz
 
   useEffect(() => {
     const onKey = (e) => {
@@ -284,6 +360,11 @@ export default function QuizView({ onNavigate }) {
         return
       }
       const k = e.key.toLowerCase()
+      if (k === 'j' || k === 'f') {
+        e.preventDefault()
+        interruptRef.current()
+        return
+      }
       if (st === 'asking') {
         if (k in KEY_TO_INDEX) {
           e.preventDefault()
@@ -304,23 +385,31 @@ export default function QuizView({ onNavigate }) {
   return (
     <section aria-label="Quiz" className="h-full flex flex-col min-h-0">
       <div className="shrink-0 px-6 md:px-8 pt-4 flex flex-wrap items-center gap-3">
-        <span className="text-muted">
+        <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Back to the lesson" onClick={() => onNavigate('lesson')}>
+          <ArrowLeft size={18} aria-hidden="true" />
+          Back to lesson
+        </button>
+        <span className="text-muted flex items-center gap-2">
+          <ListChecks size={18} aria-hidden="true" />
           Level: {DIFFICULTY_LABELS[difficultyLevel]}
           {inQuiz ? `. Score ${score}` : ''}
         </span>
         {inQuiz && (
           <>
-            <button type="button" className="btn-ghost" aria-label="Repeat the question. Shortcut R" onClick={() => repeatRef.current()}>
-              Repeat (R)
+            <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Repeat the question. Shortcut R" onClick={() => repeatRef.current()}>
+              <Repeat size={18} aria-hidden="true" />
+              Repeat
             </button>
-            <button type="button" className="btn-ghost" aria-label="End the quiz. You can also say stop the quiz" onClick={() => stopQuiz()}>
+            <button type="button" className="btn-ghost flex items-center gap-2" aria-label="End the quiz. You can also say stop the quiz" onClick={() => stopQuiz()}>
+              <Square size={18} aria-hidden="true" />
               End quiz
             </button>
           </>
         )}
         {listening && (
-          <span className="listening-pulse px-3 py-1 rounded-full border border-line text-sm" role="status">
-            Listening for your answer...
+          <span className="listening-pulse px-3 py-1 rounded-full border border-line text-sm flex items-center gap-2" role="status">
+            <Mic size={16} aria-hidden="true" />
+            Listening...
           </span>
         )}
       </div>
@@ -330,7 +419,8 @@ export default function QuizView({ onNavigate }) {
           {(state === 'idle' || state === 'done') && (
             <div>
               {state === 'done' && <p className="font-lead text-2xl mb-4" role="status">{summary}</p>}
-              <button type="button" className="btn-primary" aria-label={state === 'done' ? 'Retake the quiz' : 'Start the quiz'} onClick={startQuiz}>
+              <button type="button" className="btn-primary flex items-center gap-2" aria-label={state === 'done' ? 'Retake the quiz' : 'Start the quiz'} onClick={startQuiz}>
+                <Play size={18} aria-hidden="true" />
                 {state === 'done' ? 'Retake quiz' : 'Start quiz'}
               </button>
               <p className="text-muted mt-3 text-sm">
@@ -370,8 +460,9 @@ export default function QuizView({ onNavigate }) {
               </ul>
               <div role="status" aria-live="polite" className="mt-4">
                 {feedback && (
-                  <p className="p-3 rounded-md" style={feedback.ok ? OK_STYLE : BAD_STYLE}>
-                    {feedback.text}
+                  <p className="p-3 rounded-md flex items-start gap-2" style={feedback.ok ? OK_STYLE : BAD_STYLE}>
+                    {feedback.ok ? <CheckCircle2 size={20} aria-hidden="true" className="shrink-0 mt-0.5" /> : <XCircle size={20} aria-hidden="true" className="shrink-0 mt-0.5" />}
+                    <span>{feedback.text}</span>
                   </p>
                 )}
                 {state === 'waiting' && !feedback && (

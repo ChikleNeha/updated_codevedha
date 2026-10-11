@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { ArrowRight, Mic, Volume2 } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import { waitUntilDone } from '../hooks/useTTS'
 import { browserSpeak, browserStop, preloadVoices } from '../utils/browserTTS'
 import { classifyYesNo } from '../utils/voiceCommands'
+import { BLOCKED, micProblem } from '../utils/micErrors'
 import { createUser } from '../utils/api'
 
 const DEFAULT_NAME = 'Learner'
-const BLOCKED = ['not-allowed', 'service-not-allowed', 'not-supported', 'start-failed']
 
 const FIRST_INTRO =
   'I am a voice based tutor that teaches you Python, step by step. ' +
@@ -85,9 +86,9 @@ export default function HomePage() {
     navigate('/learn')
   }
 
-  const blockedMessage = async () => {
+  const blockedMessage = async (reason) => {
     await say(
-      'I cannot use the microphone. Please type your name in the box and press Enter. ' +
+      `${micProblem(reason) || 'I cannot use the microphone.'} Please type your name in the box and press Enter. ` +
         'You can press Alt and C at any time to change contrast.'
     )
     inputRef.current?.focus()
@@ -107,7 +108,7 @@ export default function HomePage() {
         await say(i === 0 ? CONTRAST_Q : 'Please say yes or no. Do you want high contrast?')
         const r = await ask({ silenceMs: 1200, maxWaitMs: 7000 })
         if (!live() || r.error === 'cancelled') return
-        if (BLOCKED.includes(r.error)) return blockedMessage()
+        if (BLOCKED.includes(r.error)) return blockedMessage(r.error)
         const yn = classifyYesNo(r.text)
         if (yn) {
           setContrast(yn === 'yes')
@@ -127,7 +128,7 @@ export default function HomePage() {
       await say(attempt === 0 ? 'Now, please tell me your name.' : 'Please say your name again.')
       const r = await ask({ silenceMs: 1500, maxWaitMs: 7000 })
       if (!live() || r.error === 'cancelled') return
-      if (BLOCKED.includes(r.error)) return blockedMessage()
+      if (BLOCKED.includes(r.error)) return blockedMessage(r.error)
 
       const cleaned = cleanName(r.text)
       if (cleaned) {
@@ -272,6 +273,7 @@ export default function HomePage() {
       {(phase === 'speaking' || phase === 'listening') && (
         <div className="max-w-md w-full">
           <div className={`inline-flex items-center gap-4 px-5 py-3 rounded-lg border border-line ${phase === 'listening' ? 'listening-pulse' : ''}`}>
+            {phase === 'listening' ? <Mic size={22} aria-hidden="true" /> : <Volume2 size={22} aria-hidden="true" />}
             <Wave />
             <span className="text-lg">{phase === 'listening' ? 'Listening...' : 'Speaking...'}</span>
           </div>
@@ -294,8 +296,9 @@ export default function HomePage() {
             autoComplete="given-name"
             className="flex-1 min-w-0 min-h-[44px] px-3 rounded-md bg-surface border border-line text-ink"
           />
-          <button type="submit" className="btn-primary" aria-label="Continue with the typed name">
+          <button type="submit" className="btn-primary flex items-center gap-2" aria-label="Continue with the typed name">
             Continue
+            <ArrowRight size={18} aria-hidden="true" />
           </button>
         </div>
       </form>

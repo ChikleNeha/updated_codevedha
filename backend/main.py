@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database.db import init_db
 from graph.graph import close_graph
-from routes import lesson, progress, quiz, tutor, users
+from routes import code, lesson, progress, quiz, tutor, users
 
 
 @asynccontextmanager
@@ -25,7 +25,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (users.router, progress.router, lesson.router, tutor.router, quiz.router):
+for r in (users.router, progress.router, lesson.router, tutor.router, quiz.router, code.router):
     app.include_router(r, prefix="/api")
 
 

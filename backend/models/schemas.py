@@ -99,3 +99,16 @@ class QuizResultResponse(BaseModel):
     passed: bool
     new_difficulty: Optional[str] = None
     message: str
+
+
+class CodeRunRequest(BaseModel):
+    spoken_text: str = Field(min_length=1, max_length=500)
+    current_module: int = Field(default=1, ge=1, le=5)
+
+
+class CodeRunResponse(BaseModel):
+    code: str
+    output: str = ""
+    error: str = ""
+    error_explanation: str = ""
+    success: bool

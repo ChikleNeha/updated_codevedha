@@ -3,6 +3,7 @@ import { useTTS } from '../hooks/useTTS'
 import { useSTT } from '../hooks/useSTT'
 import { browserSpeak } from '../utils/browserTTS'
 import { getProgress } from '../utils/api'
+import { DIFFICULTY_LABELS, LEVEL_ORDER, MODULES } from '../data/curriculum'
 
 const Ctx = createContext(null)
 export const useApp = () => useContext(Ctx)
@@ -39,6 +40,16 @@ export function AppProvider({ children }) {
   useEffect(() => localStorage.setItem('ac_module', String(currentModule)), [currentModule])
   useEffect(() => localStorage.setItem('ac_difficulty', difficultyLevel), [difficultyLevel])
 
+  // Whenever the level changes, from a quiz or from the tutor, say so out loud.
+  const prevLevel = useRef(difficultyLevel)
+  useEffect(() => {
+    const prev = prevLevel.current
+    if (prev === difficultyLevel) return
+    prevLevel.current = difficultyLevel
+    const up = LEVEL_ORDER.indexOf(difficultyLevel) > LEVEL_ORDER.indexOf(prev)
+    browserSpeak(`Difficulty ${up ? 'increased' : 'decreased'}. ${DIFFICULTY_LABELS[difficultyLevel]}!`)
+  }, [difficultyLevel])
+
   const setUsername = useCallback((name) => {
     localStorage.setItem('ac_username', name)
     setUsernameState(name)
@@ -63,6 +74,18 @@ export function AppProvider({ children }) {
   const replayLast = useCallback(() => {
     if (lastSpokenRef.current) return tts.speak(lastSpokenRef.current)
   }, [tts.speak])
+
+  const speakProgress = useCallback(() => {
+    const done = progress.filter((p) => p.status === 'completed')
+    let text
+    if (!done.length) {
+      text = 'You have not completed any modules yet. Score at least 60 percent on a quiz to complete a module.'
+    } else {
+      const avg = Math.round(done.reduce((sum, p) => sum + (p.quiz_score || 0), 0) / done.length)
+      text = `You have completed ${done.length} of ${MODULES.length} modules. Your average score is ${avg} percent.`
+    }
+    return speakAndStore(text)
+  }, [progress, speakAndStore])
 
   const setContrast = useCallback((on) => {
     setIsHighContrast(on)
@@ -121,12 +144,12 @@ export function AppProvider({ children }) {
       lessonState, setLessonState,
       isHighContrast, toggleHighContrast, setContrast,
       fontSize, changeFontSize,
-      progress, refreshProgress,
+      progress, refreshProgress, speakProgress,
       tts, stt, speakAndStore, replayLast, stopAll,
     }),
     [username, sessionId, currentModule, difficultyLevel, lessonState, isHighContrast, fontSize,
       progress, tts, stt, speakAndStore, replayLast, stopAll, toggleHighContrast, setContrast,
-      changeFontSize, setUsername, refreshProgress]
+      changeFontSize, setUsername, refreshProgress, speakProgress]
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

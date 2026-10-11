@@ -13,6 +13,11 @@
   --focus: #529cf0;
   --btn-bg: #ebebeb;
   --btn-ink: #191919;
+  --tok-kw: #7ab7ff;
+  --tok-str: #9ccc8c;
+  --tok-num: #e6a36b;
+  --tok-com: #8a8a8a;
+  --tok-bi: #6fd0c5;
 }
 
 .hc {
@@ -26,7 +31,13 @@
   --focus: #ffffff;
   --btn-bg: #ffd700;
   --btn-ink: #000000;
+  --tok-kw: #ffd700;
+  --tok-str: #ffd700;
+  --tok-num: #ffd700;
+  --tok-com: #ffd700;
+  --tok-bi: #ffd700;
 }
+.hc .tok-kw { text-decoration: underline; }
 
 html { font-size: 17px; }
 
@@ -138,3 +149,17 @@ button, input { font-family: inherit; font-size: 1rem; }
   .wave-bar, .listening-pulse, .cursor-blink { animation: none; }
   .wave-bar { transform: scaleY(0.6); }
 }
+
+.tok-kw { color: var(--tok-kw); }
+.tok-str { color: var(--tok-str); }
+.tok-num { color: var(--tok-num); }
+.tok-com { color: var(--tok-com); font-style: italic; }
+.tok-bi { color: var(--tok-bi); }
+
+.badge-pop { animation: badge-pop 0.9s ease-out; }
+@keyframes badge-pop {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(82, 156, 240, 0.6); }
+  30% { transform: scale(1.18); }
+  100% { transform: scale(1); box-shadow: 0 0 0 14px rgba(82, 156, 240, 0); }
+}
+@media (prefers-reduced-motion: reduce) { .badge-pop { animation: none; } }
