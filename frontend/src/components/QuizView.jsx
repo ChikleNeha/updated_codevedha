@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, CheckCircle2, ListChecks, Mic, Play, Repeat, Square, XCircle } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, ListChecks, Play, Repeat, Square, VolumeX, XCircle } from 'lucide-react'
 import { useApp } from '../context/AppContext'
 import { chat, errorMessage, getQuiz, submitQuizResult } from '../utils/api'
 import { browserSpeak } from '../utils/browserTTS'
 import { waitUntilDone } from '../hooks/useTTS'
-import { classifyYesNo, interpretQuizSpeech, parseCommand } from '../utils/voiceCommands'
+import { classifyYesNo, interpretQuizSpeech, isSilenceRequest, parseCommand } from '../utils/voiceCommands'
 import { BLOCKED, micProblem } from '../utils/micErrors'
+import Thinking from './Thinking'
+import { QUESTION_STEPS, startThinking } from '../utils/thinking'
 import { DIFFICULTY_LABELS, MODULES } from '../data/curriculum'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -28,6 +30,8 @@ export default function QuizView({ onNavigate, onCommand }) {
   const [feedback, setFeedback] = useState(null)
   const [summary, setSummary] = useState('')
   const [listening, setListening] = useState(false)
+  const [thinkText, setThinkText] = useState('')
+  const feedbackRef = useRef(null)
   const [note, setNote] = useState('') // the last answer to a question about progress, time or modules
 
   const stateRef = useRef('idle')
@@ -58,13 +62,21 @@ export default function QuizView({ onNavigate, onCommand }) {
 
   const listenTurn = async (opts) => {
     setListening(true)
-    const r = await stt.listen(opts)
+    const r = await stt.listen({
+      ...opts,
+      onSlow: () => {
+        setThinkText('Audio is processing.')
+        browserSpeak('Audio is processing.')
+      },
+    })
+    setThinkText('')
     setListening(false)
     return r
   }
 
   // Questions about progress, modules or time. Python questions wait until the lesson (scope quiz).
   const askAssistant = async (text) => {
+    const stopThinking = startThinking(QUESTION_STEPS, setThinkText)
     try {
       const { sessionId: sid, currentModule: mid, difficultyLevel: diff } = live.current
       const res = await chat({
@@ -74,6 +86,8 @@ export default function QuizView({ onNavigate, onCommand }) {
       return res.response
     } catch (e) {
       return errorMessage(e)
+    } finally {
+      stopThinking()
     }
   }
 
@@ -112,6 +126,7 @@ export default function QuizView({ onNavigate, onCommand }) {
       silences = 0
       const intent = interpretQuizSpeech(text, q.options)
       if (run !== runRef.current) return
+      if (intent.type === 'silence') return silenceQuiz()
       if (intent.type === 'answer') return handleAnswer(intent.index)
       if (intent.type === 'stop') return stopQuiz()
       if (intent.type === 'nav') return onNavigate(intent.to)
@@ -178,12 +193,32 @@ export default function QuizView({ onNavigate, onCommand }) {
     const shown = ok
       ? `You chose option ${LETTERS[choice]}. Correct. ${q.explanation}`
       : `You chose option ${LETTERS[choice]}. Wrong. The correct answer is option ${LETTERS[q.correct_index]}, ${q.options[q.correct_index]}. ${q.explanation}`
-    setFeedback({ ok, text: shown, chosen: choice })
+    feedbackRef.current = { ok, text: shown, chosen: choice }
+    setFeedback(feedbackRef.current)
     tts.stop()
     await sleep(100)
     await speakAndStore(shown)
     await sleep(800)
     await waitUntilDone(30000)
+    if (run !== runRef.current || !aliveRef.current) return
+    return advance()
+  }
+
+  // "Stop reading": go quiet and wait. The learner brings the reading back with J and "read again", or Space.
+  const silenceQuiz = () => {
+    runRef.current++
+    stt.cancelListening()
+    setListening(false)
+    tts.stop()
+    if (stateRef.current === 'asking' || stateRef.current === 'feedback') setState('waiting')
+    browserSpeak('Paused. Press J and say read again, or press Space, when you are ready.')
+  }
+
+  // Read the verdict again if the question was already answered, then carry on.
+  const replayFeedback = async () => {
+    const run = ++runRef.current
+    setState('feedback')
+    await say(feedbackRef.current.text)
     if (run !== runRef.current || !aliveRef.current) return
     return advance()
   }
@@ -296,6 +331,9 @@ export default function QuizView({ onNavigate, onCommand }) {
     const t = r.text.trim()
     if (!t) return say('I did not hear a command. Press Space when you are ready.')
 
+    if (isSilenceRequest(t)) {
+      return say('Okay, I will wait. Press J and say read again, or press Space, when you are ready.')
+    }
     const cmd = parseCommand(t)
     if (inQuiz) {
       if (cmd === 'stop' || /\b(end|quit|exit)\b/i.test(t)) return stopQuiz()
@@ -368,8 +406,11 @@ export default function QuizView({ onNavigate, onCommand }) {
   repeatRef.current = () => {
     runRef.current++
     stt.cancelListening()
+    if (answeredRef.current && feedbackRef.current) return replayFeedback()
     return runQuestion(idxRef.current)
   }
+  const silenceRef = useRef(null)
+  silenceRef.current = silenceQuiz
   const interruptRef = useRef(null)
   interruptRef.current = interruptQuiz
 
@@ -393,14 +434,19 @@ export default function QuizView({ onNavigate, onCommand }) {
         interruptRef.current()
         return
       }
-      if (st === 'asking') {
-        if (k in KEY_TO_INDEX) {
-          e.preventDefault()
-          answerRef.current(KEY_TO_INDEX[k])
-        } else if (k === 'r') {
-          e.preventDefault()
-          repeatRef.current()
-        }
+      if (k === 's' && (st === 'asking' || st === 'feedback')) {
+        e.preventDefault()
+        silenceRef.current()
+        return
+      }
+      if (k === 'r' && (st === 'asking' || st === 'waiting')) {
+        e.preventDefault()
+        repeatRef.current()
+        return
+      }
+      if (st === 'asking' && k in KEY_TO_INDEX) {
+        e.preventDefault()
+        answerRef.current(KEY_TO_INDEX[k])
       }
     }
     window.addEventListener('keydown', onKey)
@@ -413,7 +459,7 @@ export default function QuizView({ onNavigate, onCommand }) {
   return (
     <section aria-label="Quiz" className="h-full flex flex-col min-h-0">
       <div className="shrink-0 px-6 md:px-8 pt-4 flex flex-wrap items-center gap-3">
-        <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Back to the lesson" onClick={() => onNavigate('lesson')}>
+        <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Back to the lesson" onClick={() => onNavigate('lesson')}>
           <ArrowLeft size={18} aria-hidden="true" />
           Back to lesson
         </button>
@@ -424,22 +470,25 @@ export default function QuizView({ onNavigate, onCommand }) {
         </span>
         {inQuiz && (
           <>
-            <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Repeat the question. Shortcut R" onClick={() => repeatRef.current()}>
+            <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Stop reading. Shortcut S. Press J and say read again to continue" onClick={() => silenceRef.current()}>
+              <VolumeX size={18} aria-hidden="true" />
+              Stop reading
+            </button>
+            <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Repeat the question. Shortcut R" onClick={() => repeatRef.current()}>
               <Repeat size={18} aria-hidden="true" />
               Repeat
             </button>
-            <button type="button" className="btn-ghost flex items-center gap-2" aria-label="End the quiz. You can also say stop the quiz" onClick={() => stopQuiz()}>
+            <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="End the quiz. You can also say stop the quiz" onClick={() => stopQuiz()}>
               <Square size={18} aria-hidden="true" />
               End quiz
             </button>
           </>
         )}
-        {listening && (
-          <span className="listening-pulse px-3 py-1 rounded-full border border-line text-sm flex items-center gap-2" role="status">
-            <Mic size={16} aria-hidden="true" />
-            Listening...
-          </span>
-        )}
+        <p role="status" aria-live="polite" className="sr-only">{listening && !thinkText ? 'Listening for your answer.' : ''}</p>
+        <Thinking
+          text={thinkText || (listening ? 'Listening for your answer...' : '')}
+          kind={thinkText ? 'busy' : 'listening'}
+        />
       </div>
 
       <div className="flex-1 min-h-0 px-6 md:px-8 py-4">
@@ -447,7 +496,7 @@ export default function QuizView({ onNavigate, onCommand }) {
           {(state === 'idle' || state === 'done') && (
             <div>
               {state === 'done' && <p className="font-lead text-2xl mb-4" role="status">{summary}</p>}
-              <button type="button" className="btn-primary flex items-center gap-2" aria-label={state === 'done' ? 'Retake the quiz' : 'Start the quiz'} onClick={startQuiz}>
+              <button type="button" className="btn-primary btn-sm flex items-center gap-2" aria-label={state === 'done' ? 'Retake the quiz' : 'Start the quiz'} onClick={startQuiz}>
                 <Play size={18} aria-hidden="true" />
                 {state === 'done' ? 'Retake quiz' : 'Start quiz'}
               </button>
@@ -496,8 +545,8 @@ export default function QuizView({ onNavigate, onCommand }) {
                     <span>{feedback.text}</span>
                   </p>
                 )}
-                {state === 'waiting' && !feedback && (
-                  <p className="text-muted">Paused. Press Space to continue.</p>
+                {state === 'waiting' && (
+                  <p className="text-muted">Paused. Press Space to continue, or press J and say read again.</p>
                 )}
               </div>
             </div>

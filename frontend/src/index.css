@@ -94,6 +94,13 @@ button, input { font-family: inherit; font-size: 1rem; }
 }
 .btn-ghost:hover { background: var(--raised); }
 
+.btn-sm {
+  min-height: 36px;
+  min-width: 36px;
+  padding: 4px 12px;
+  font-size: 0.9rem;
+}
+
 .card-code {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 0.82rem;

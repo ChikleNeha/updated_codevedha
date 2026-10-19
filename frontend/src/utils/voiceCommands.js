@@ -61,6 +61,10 @@ const APP_QUESTIONS = [
   /\b(what can you do|who are you)\b/,
 ]
 
+// "stop reading", "be quiet": silence the voice without ending anything
+const SILENCE_RE = /\b(stop|quiet|silence|pause|hold on|enough)\b.*\b(reading|talking|speaking|read)\b|\bstop (the )?(reading|talking)\b|\b(be quiet|shut up)\b/
+export const isSilenceRequest = (text) => SILENCE_RE.test(norm(text))
+
 export function isAppQuestion(text) {
   const t = norm(text)
   if (!t) return false
@@ -83,7 +87,7 @@ export function parseCommand(text, { titles = true } = {}) {
     if (jump !== null) return `goto:${jump}`
   }
   if (/\b(restart|start over|from the beginning)\b/.test(t)) return 'restart'
-  if (/\b(replay|repeat|again)\b/.test(t)) return 'replay'
+  if (/\b(replay|repeat|again)\b|\bread (it|that|this|the (question|quiz|options))\b/.test(t)) return 'replay'
   if (/\b(progress|how am i doing|my scores?|my results?)\b/.test(t)) return 'progress'
   if (/\b(quiz|test)\b/.test(t)) return 'quiz'
   if (/\b(go|move|back|return|open|switch|take)\b.*\blesson\b|\blesson (page|tab)\b|^lesson$/.test(t)) return 'lesson'
@@ -167,6 +171,7 @@ function matchOption(t, options) {
 export function interpretQuizSpeech(text, options) {
   const t = norm(text)
   if (!t) return { type: 'none' }
+  if (SILENCE_RE.test(t)) return { type: 'silence' } // before the check below, because "stop reading the quiz" has both words
   if (/\b(stop|quit|exit|end|cancel|finish)\b.*\b(quiz|test)\b|\b(quiz|test)\b.*\b(stop|quit|exit|end)\b|^(stop|quit|exit)$/.test(t))
     return { type: 'stop' }
   if (/\b(go|back|return|move|switch|open)\b.*\blesson\b|\blesson (page|tab)\b/.test(t)) return { type: 'nav', to: 'lesson' }

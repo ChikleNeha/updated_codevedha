@@ -7,6 +7,9 @@ import { cleanForSpeech, codeToSpeech } from '../utils/speech'
 import { highlightPython } from '../utils/pyHighlight'
 import { isAppQuestion, parseCommand } from '../utils/voiceCommands'
 import { BLOCKED, micProblem } from '../utils/micErrors'
+import { browserSpeak } from '../utils/browserTTS'
+import Thinking from './Thinking'
+import { CODE_STEPS, QUESTION_STEPS, startThinking } from '../utils/thinking'
 import { MODULES } from '../data/curriculum'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -50,7 +53,7 @@ export default function CodeView({ onCommand }) {
   const [status, _setStatus] = useState('idle') // idle listening running
   const [typed, setTyped] = useState('')
   const [notice, setNotice] = useState('') // a visible message for anything that goes wrong with the microphone
-  const [slow, setSlow] = useState(false)
+  const [thinkText, setThinkText] = useState('')
   const [note, setNote] = useState('') // the last answer to a question about progress, time or modules
 
   const attemptsRef = useRef([])
@@ -94,26 +97,18 @@ export default function CodeView({ onCommand }) {
     const myId = ++runIdRef.current
     setStatus('running')
     setNotice('')
-    setSlow(false)
-    tts.speak(`I heard: ${cleanForSpeech(text)}. Working on it.`)
-    const slowTimer = setTimeout(() => {
-      if (statusRef.current === 'running') {
-        setSlow(true)
-        tts.speak('Still working. The AI model may be busy.')
-      }
-    }, 9000)
+    tts.speak(`I heard: ${cleanForSpeech(text)}.`)
+    const stopThinking = startThinking(CODE_STEPS, setThinkText)
     try {
       const res = await runCode({ spoken_text: text, current_module: currentModule })
-      clearTimeout(slowTimer)
-      setSlow(false)
+      stopThinking()
       if (myId !== runIdRef.current || !aliveRef.current) return
       const attempt = { id: Date.now(), spoken: text, ...res }
       setAttempts([...attemptsRef.current, attempt])
       setStatus('idle')
       await say(speechFor(attempt))
     } catch (e) {
-      clearTimeout(slowTimer)
-      setSlow(false)
+      stopThinking()
       if (myId !== runIdRef.current || !aliveRef.current) return
       setStatus('idle')
       const msg = errorMessage(e)
@@ -124,6 +119,7 @@ export default function CodeView({ onCommand }) {
 
   // Questions about progress, modules or time are answered, not turned into code.
   const askAssistant = async (text) => {
+    const stopThinking = startThinking(QUESTION_STEPS, setThinkText)
     try {
       const res = await chat({
         session_id: sessionId, module_id: currentModule, message: text, difficulty: difficultyLevel,
@@ -135,7 +131,22 @@ export default function CodeView({ onCommand }) {
       const msg = errorMessage(e)
       setNote(msg)
       return msg
+    } finally {
+      stopThinking()
     }
+  }
+
+  // Listens, and says "audio is processing" if the words take a moment to come back.
+  const listenOnce = async (opts) => {
+    const r = await stt.listen({
+      ...opts,
+      onSlow: () => {
+        setThinkText('Audio is processing.')
+        browserSpeak('Audio is processing.')
+      },
+    })
+    setThinkText('')
+    return r
   }
 
   const handleSpoken = async (text) => {
@@ -164,7 +175,7 @@ export default function CodeView({ onCommand }) {
     setStatus('listening')
     await sleep(250) // some browsers need a moment after speech is cancelled before the microphone opens
     if (run !== runIdRef.current || !aliveRef.current) return
-    const r = await stt.listen({ silenceMs: 2500, maxWaitMs: 12000 })
+    const r = await listenOnce({ silenceMs: 2500, maxWaitMs: 12000 })
     if (run !== runIdRef.current || !aliveRef.current || r.error === 'cancelled') {
       if (statusRef.current === 'listening') setStatus('idle')
       return
@@ -194,7 +205,7 @@ export default function CodeView({ onCommand }) {
     setStatus('listening')
     await say('What do you want to do?')
     if (myId !== runIdRef.current || !aliveRef.current) return
-    const r = await stt.listen({ silenceMs: 1500, maxWaitMs: 8000 })
+    const r = await listenOnce({ silenceMs: 1500, maxWaitMs: 8000 })
     if (myId !== runIdRef.current || !aliveRef.current || r.error === 'cancelled') {
       if (statusRef.current === 'listening') setStatus('idle')
       return
@@ -307,13 +318,13 @@ export default function CodeView({ onCommand }) {
   return (
     <section aria-label="Code practice" className="h-full flex flex-col min-h-0">
       <div className="shrink-0 px-6 md:px-8 pt-4 flex flex-wrap items-center gap-3">
-        <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Back to the lesson" onClick={() => onCommand('lesson')}>
+        <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Back to the lesson" onClick={() => onCommand('lesson')}>
           <ArrowLeft size={18} aria-hidden="true" />
           Back to lesson
         </button>
         <button
           type="button"
-          className={`btn-primary flex items-center gap-2 ${status === 'listening' ? 'listening-pulse' : ''}`}
+          className={`btn-primary btn-sm flex items-center gap-2 ${status === 'listening' ? 'listening-pulse' : ''}`}
           aria-label={status === 'listening' ? 'Finish speaking and run the code' : 'Speak your code. Shortcut Space'}
           disabled={status === 'running'}
           onClick={() => (status === 'listening' ? stt.stopListening() : startListening())}
@@ -321,17 +332,19 @@ export default function CodeView({ onCommand }) {
           <Mic size={18} aria-hidden="true" />
           {status === 'listening' ? 'Done' : 'Speak code'}
         </button>
-        <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Repeat the last result. Shortcut R" onClick={() => repeatLast()}>
+        <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Repeat the last result. Shortcut R" onClick={() => repeatLast()}>
           <RotateCcw size={18} aria-hidden="true" />
           Repeat
         </button>
-        <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Clear the history. Shortcut C" onClick={() => clearHistory()}>
+        <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Clear the history. Shortcut C" onClick={() => clearHistory()}>
           <Trash2 size={18} aria-hidden="true" />
           Clear
         </button>
-        <p role="status" aria-live="polite" className="text-muted text-sm ml-1">
-          {slow ? 'Still working. The AI model may be busy writing lessons.' : statusText}
-        </p>
+        <p role="status" aria-live="polite" className="sr-only">{thinkText ? '' : statusText}</p>
+        <Thinking
+          text={thinkText || statusText}
+          kind={thinkText || status === 'running' ? 'busy' : status === 'listening' ? 'listening' : 'info'}
+        />
       </div>
       {notice && (
         <p role="alert" className="mx-6 md:mx-8 mt-3 p-3 rounded-md text-sm" style={BAD_STYLE}>{notice}</p>
@@ -381,9 +394,9 @@ export default function CodeView({ onCommand }) {
           value={typed}
           onChange={(e) => setTyped(e.target.value)}
           placeholder="Or type what the code should do"
-          className="flex-1 min-w-0 min-h-[44px] px-3 rounded-md bg-surface border border-line text-ink"
+          className="flex-1 min-w-0 min-h-[36px] px-3 rounded-md bg-surface border border-line text-ink"
         />
-        <button type="submit" className="btn-primary flex items-center gap-2" aria-label="Run" disabled={status === 'running'}>
+        <button type="submit" className="btn-primary btn-sm flex items-center gap-2" aria-label="Run" disabled={status === 'running'}>
           <Send size={18} aria-hidden="true" />
           Run
         </button>

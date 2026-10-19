@@ -12,6 +12,8 @@ export function useSTT() {
   const resolveRef = useRef(null)
   const settledRef = useRef(true)
   const timers = useRef({ silence: null, max: null })
+  const slowTimerRef = useRef(null)
+  const onSlowRef = useRef(null)
 
   const clearTimers = () => {
     clearTimeout(timers.current.silence)
@@ -22,6 +24,8 @@ export function useSTT() {
     if (settledRef.current) return
     settledRef.current = true
     clearTimers()
+    clearTimeout(slowTimerRef.current)
+    slowTimerRef.current = null
     setIsListening(false)
     const resolve = resolveRef.current
     resolveRef.current = null
@@ -34,6 +38,10 @@ export function useSTT() {
       recRef.current?.stop()
     } catch {
       /* already stopped */
+    }
+    // if the words take a moment to come back, let the page say "audio is processing"
+    if (recRef.current && heardRef.current && !slowTimerRef.current) {
+      slowTimerRef.current = setTimeout(() => onSlowRef.current?.(), 700)
     }
   }, [])
 
@@ -55,7 +63,8 @@ export function useSTT() {
   const listen = useCallback(
     (opts = {}) =>
       new Promise((resolve) => {
-        const { lang = 'en-IN', silenceMs = 2200, maxWaitMs = 9000 } = opts
+        const { lang = 'en-IN', silenceMs = 2200, maxWaitMs = 9000, onSlow } = opts
+        onSlowRef.current = onSlow || null
         if (!SR) {
           resolve({ text: '', error: 'not-supported' })
           return

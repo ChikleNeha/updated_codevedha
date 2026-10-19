@@ -144,7 +144,7 @@ export default function LearnPage() {
       <header className="shrink-0 border-b border-line bg-surface px-4 py-2 flex flex-wrap items-center gap-x-4 gap-y-2">
         <button
           type="button"
-          className="btn-ghost flex items-center gap-2"
+          className="btn-ghost btn-sm flex items-center gap-2"
           aria-label="Home. This returns to the welcome page where you can change your name."
           onClick={() => { stopAll(); navigate('/') }}
         >
@@ -160,7 +160,7 @@ export default function LearnPage() {
               aria-current={tab === id ? 'page' : undefined}
               aria-label={`${label} page, shortcut ${key}`}
               onClick={() => goTab(id)}
-              className={`min-h-[44px] px-4 rounded-md border flex items-center gap-2 ${
+              className={`min-h-[36px] px-3 py-1 rounded-md border flex items-center gap-2 ${
                 tab === id ? 'bg-raised border-accent' : 'border-line text-muted hover:bg-raised'
               }`}
             >
@@ -174,7 +174,7 @@ export default function LearnPage() {
         <div className="ml-auto flex items-center gap-3">
           <button
             type="button"
-            className={`btn-ghost flex items-center gap-2 ${stt.isListening ? 'listening-pulse' : ''}`}
+            className={`btn-ghost btn-sm flex items-center gap-2 ${stt.isListening ? 'listening-pulse' : ''}`}
             aria-label="Speak a command. Shortcut J or F"
             onClick={() => window.dispatchEvent(new Event('codevedha:interrupt'))}
           >
@@ -199,8 +199,7 @@ export default function LearnPage() {
       {/* Live captions: shows what the microphone is hearing. */}
       {stt.isListening && (
         <p role="status" className="shrink-0 px-4 py-1 text-sm bg-raised border-b border-line flex items-center gap-2">
-          <Mic size={14} aria-hidden="true" />
-          Listening: {stt.transcript || '...'}
+          Hearing: {stt.transcript || '...'}
         </p>
       )}
 
@@ -224,7 +223,7 @@ export default function LearnPage() {
       <footer className="shrink-0 border-t border-line bg-surface px-4 py-2 flex flex-wrap items-center gap-3">
         <button
           type="button"
-          className="btn-ghost flex items-center gap-2"
+          className="btn-ghost btn-sm flex items-center gap-2"
           aria-pressed={isHighContrast}
           aria-label={`High contrast, currently ${isHighContrast ? 'on' : 'off'}. Shortcut Alt and C, or H`}
           onClick={toggleHighContrast}
@@ -232,10 +231,10 @@ export default function LearnPage() {
           <Contrast size={18} aria-hidden="true" />
           Contrast
         </button>
-        <button type="button" className="btn-ghost" aria-label="Make text smaller" onClick={() => changeFontSize(-1)}>
+        <button type="button" className="btn-ghost btn-sm" aria-label="Make text smaller" onClick={() => changeFontSize(-1)}>
           <ZoomOut size={18} aria-hidden="true" />
         </button>
-        <button type="button" className="btn-ghost" aria-label="Make text larger" onClick={() => changeFontSize(1)}>
+        <button type="button" className="btn-ghost btn-sm" aria-label="Make text larger" onClick={() => changeFontSize(1)}>
           <ZoomIn size={18} aria-hidden="true" />
         </button>
         <span className="text-muted text-sm">{HINTS[tab]} Escape stops audio.</span>

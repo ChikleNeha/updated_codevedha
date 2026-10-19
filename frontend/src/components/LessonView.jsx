@@ -7,6 +7,8 @@ import { waitUntilDone } from '../hooks/useTTS'
 import { draftText, parseCards, parseCardsPartial, plain, speechOf, splitBody } from '../utils/speech'
 import { classifySubmit, classifyYesNo, parseCommand } from '../utils/voiceCommands'
 import { BLOCKED, micProblem } from '../utils/micErrors'
+import Thinking from './Thinking'
+import { LESSON_STEPS, QUESTION_STEPS, startThinking } from '../utils/thinking'
 import { DIFFICULTY_LABELS, LEVEL_ORDER, MODULES, SHORTCUTS, VOICE_COMMANDS } from '../data/curriculum'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -31,6 +33,7 @@ export default function LessonView({ onNavigate }) {
   const [panelOpen, setPanelOpen] = useState(false)
   const [listening, _setListening] = useState(false)
   const [typed, setTyped] = useState('')
+  const [thinkText, setThinkText] = useState('')
 
   const stateRef = useRef('loading')
   const isListeningRef = useRef(false)
@@ -46,6 +49,8 @@ export default function LessonView({ onNavigate }) {
   const logRef = useRef(null)
   const inputRef = useRef(null)
   const cardEls = useRef([])
+  const awaitingRef = useRef(null) // a spoken yes or no question that is waiting for an answer
+  const thinkStopRef = useRef(null)
   const live = useRef({})
   live.current = { sessionId, currentModule, difficultyLevel, mod }
 
@@ -79,7 +84,14 @@ export default function LessonView({ onNavigate }) {
 
   const listenTurn = async (opts) => {
     setListening(true)
-    const r = await stt.listen(opts)
+    const r = await stt.listen({
+      ...opts,
+      onSlow: () => {
+        setThinkText('Audio is processing.')
+        browserSpeak('Audio is processing.')
+      },
+    })
+    setThinkText('')
     setListening(false)
     return r
   }
@@ -160,6 +172,8 @@ export default function LessonView({ onNavigate }) {
     setGenerating(true)
     setStatus('loading')
     setStatusMsg('')
+    thinkStopRef.current?.()
+    thinkStopRef.current = startThinking(LESSON_STEPS, setThinkText)
     updateProgress({ session_id: sid, module_id: mid, status: 'in_progress' }).then(refreshProgress).catch(() => {})
 
     let spoke = false
@@ -181,10 +195,12 @@ export default function LessonView({ onNavigate }) {
         setDraft(draftText(d))
         if (!startedRef.current && complete.length >= 1) {
           startedRef.current = true
+          thinkStopRef.current?.()
           readFrom(0)
         }
       },
       onDone: (content) => {
+        thinkStopRef.current?.()
         const list = parseCards(content)
         if (!list.length) {
           streamDoneRef.current = true
@@ -215,6 +231,7 @@ export default function LessonView({ onNavigate }) {
         }
       },
       onError: (msg) => {
+        thinkStopRef.current?.()
         setGenerating(false)
         streamDoneRef.current = true
         runIdRef.current++
@@ -251,6 +268,7 @@ export default function LessonView({ onNavigate }) {
   useEffect(() => {
     loadLesson(false)
     return () => {
+      thinkStopRef.current?.()
       cancelStreamRef.current?.()
       runIdRef.current++
       interruptIdRef.current++
@@ -275,9 +293,11 @@ export default function LessonView({ onNavigate }) {
     if (myId !== interruptIdRef.current) return
     setStatus('interrupted')
     setPanelOpen(true)
+    awaitingRef.current = { kind: 'continue', id: myId }
     await say('Should I continue the lesson?')
     if (myId !== interruptIdRef.current) return
     const r = await listenTurn({ silenceMs: 1300, maxWaitMs: 7000 })
+    awaitingRef.current = null
     if (myId !== interruptIdRef.current || r.error === 'cancelled') return
     if (BLOCKED.includes(r.error)) return micBlocked(r.error)
     const text = r.text.trim()
@@ -302,6 +322,7 @@ export default function LessonView({ onNavigate }) {
     addChat('user', question)
     const { sessionId: sid, currentModule: mid, difficultyLevel: diff } = live.current
     const card = cardsRef.current[resumeFromRef.current]
+    const stopThinking = startThinking(QUESTION_STEPS, setThinkText)
     try {
       const res = await chat({
         session_id: sid,
@@ -312,6 +333,7 @@ export default function LessonView({ onNavigate }) {
         scope: 'lesson',
         username,
       })
+      stopThinking()
       if (myId !== interruptIdRef.current) return
       let newDiff = null
       addChat('assistant', res.response)
@@ -337,6 +359,7 @@ export default function LessonView({ onNavigate }) {
       await sleep(500)
       return askToContinue(myId)
     } catch (e) {
+      stopThinking()
       if (myId !== interruptIdRef.current) return
       const msg = errorMessage(e)
       addChat('system', msg)
@@ -407,8 +430,8 @@ export default function LessonView({ onNavigate }) {
   }
 
   // Listens, reads back what it heard, and asks whether to send it or add more.
-  const dialog = async (myId, initial = '') => {
-    let pending = ''
+  const dialog = async (myId, initial = '', startPending = '') => {
+    let pending = startPending
     let carry = initial
     let skipListen = false
     for (let round = 0; round < 6; round++) {
@@ -434,9 +457,11 @@ export default function LessonView({ onNavigate }) {
       if (cmd) return runCommand(cmd, pending, myId)
 
       const shown = pending.split(' ').slice(0, 30).join(' ')
+      awaitingRef.current = { kind: 'send', id: myId, pending }
       await say(`I heard: ${shown}. Should I send that, or do you want to add more?`)
       if (myId !== interruptIdRef.current) return
       const a = await listenTurn({ silenceMs: 1500, maxWaitMs: 8000 })
+      awaitingRef.current = null
       if (myId !== interruptIdRef.current || a.error === 'cancelled') return
       const c = classifySubmit(a.text)
       if (c.type === 'cancel') {
@@ -491,20 +516,64 @@ export default function LessonView({ onNavigate }) {
     return dialog(myId)
   }
 
-  const submitTyped = (e) => {
+  const submitTyped = async (e) => {
     e.preventDefault()
     const q = typed.trim()
     if (!q) return
     setTyped('')
+    // If a spoken question was waiting for an answer, this typed text IS that answer.
+    const w = awaitingRef.current
+    const waiting = w && w.id === interruptIdRef.current ? w : null
+    awaitingRef.current = null
     stt.cancelListening()
     const myId = ++interruptIdRef.current
     runIdRef.current++
     cancelledRef.current = true
     tts.stop()
     setPanelOpen(true)
+
+    if (waiting?.kind === 'continue') {
+      const yn = classifyYesNo(q)
+      if (yn === 'yes') {
+        addChat('user', q)
+        return resumeLesson()
+      }
+      if (yn === 'no') {
+        addChat('user', q)
+        await say('Okay. What would you like to do?')
+        return dialog(myId)
+      }
+    } else if (waiting?.kind === 'send') {
+      const c = classifySubmit(q)
+      if (c.type === 'submit') return submitQuestion(waiting.pending, myId)
+      if (c.type === 'cancel') {
+        addChat('user', q)
+        await say('Okay, I dropped that.')
+        return askToContinue(myId)
+      }
+      if (c.type === 'retry') {
+        addChat('user', q)
+        await say('Okay, say it again.')
+        return dialog(myId)
+      }
+      if (c.type === 'more') {
+        addChat('user', q)
+        await say('Go ahead.')
+        return dialog(myId, '', waiting.pending)
+      }
+      // a full typed sentence is a new question, typed on purpose, so it replaces the spoken one
+      return submitQuestion(q, myId)
+    }
+
+    // a bare "yes" while the lesson is paused simply continues it
+    if (classifyYesNo(q) === 'yes' && q.split(/\s+/).length <= 3 && ['paused', 'interrupted'].includes(stateRef.current)) {
+      addChat('user', q)
+      return resumeLesson()
+    }
+
     const cmd = parseCommand(q)
-    if (cmd) runCommand(cmd, q, myId)
-    else submitQuestion(q, myId)
+    if (cmd) return runCommand(cmd, q, myId)
+    return submitQuestion(q, myId)
   }
 
   // ---------- keyboard ----------
@@ -565,33 +634,40 @@ export default function LessonView({ onNavigate }) {
   }, [stt.stopListening])
 
   // ---------- render ----------
-  const statusText = {
+  // One status, in priority order: the narrated thinking line, then the microphone, then the lesson state.
+  const stateText = {
     loading: statusMsg || 'Getting your lesson ready.',
     reading: `Reading card ${active + 1}${generating ? '. More cards are still being written.' : ` of ${cards.length}.`} Space pauses.`,
     paused: 'Paused. Press Space to continue.',
-    interrupted: listening ? 'Listening. Speak, then pause. Press Space if you have finished.' : 'Waiting for you.',
     answering: 'Thinking about your question.',
     done: 'Lesson finished. Press Q for the quiz, or Space to hear it again.',
     error: statusMsg,
   }[status]
+  let pill = null
+  if (thinkText) pill = { text: thinkText, kind: 'busy' }
+  else if (listening) pill = { text: 'Listening. Speak, then pause. Space if you have finished.', kind: 'listening' }
+  else if (status === 'loading' || status === 'answering') pill = { text: stateText, kind: 'busy' }
+  else if (stateText) pill = { text: stateText, kind: 'info' }
+  else if (status === 'interrupted' && tts.isSpeaking) pill = { text: 'Speaking...', kind: 'speaking' }
 
   return (
     <section aria-label="Lesson" className="h-full flex flex-col min-h-0">
       <div className="shrink-0 px-6 md:px-8 pt-4 flex flex-wrap items-center gap-3">
-        <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Interrupt and ask a question. Shortcut J or F" onClick={() => interrupt()}>
+        <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Interrupt and ask a question. Shortcut J or F" onClick={() => interrupt()}>
           <Mic size={18} aria-hidden="true" />
           Ask a question (J)
         </button>
         <button
           type="button"
-          className="btn-ghost flex items-center gap-2"
+          className="btn-ghost btn-sm flex items-center gap-2"
           aria-label={status === 'reading' ? 'Pause the lesson' : status === 'done' ? 'Hear the lesson again' : 'Resume the lesson'}
           onClick={() => primary()}
         >
           {status === 'reading' ? <Pause size={18} aria-hidden="true" /> : status === 'done' ? <RotateCcw size={18} aria-hidden="true" /> : <Play size={18} aria-hidden="true" />}
           {status === 'reading' ? 'Pause' : status === 'done' ? 'Hear again' : 'Resume'}
         </button>
-        <p role="status" aria-live="polite" className="text-muted text-sm ml-1">{statusText}</p>
+        <p role="status" aria-live="polite" className="sr-only">{!thinkText && pill ? pill.text : ''}</p>
+        <Thinking text={pill?.text} kind={pill?.kind} />
       </div>
 
       <div className="flex-1 min-h-0 px-6 md:px-8 py-4">
@@ -662,22 +738,22 @@ export default function LessonView({ onNavigate }) {
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
               placeholder="Or type here"
-              className="flex-1 min-w-[10rem] min-h-[44px] px-3 rounded-md bg-bg border border-line text-ink"
+              className="flex-1 min-w-[10rem] min-h-[36px] px-3 rounded-md bg-bg border border-line text-ink"
             />
-            <button type="submit" className="btn-primary flex items-center gap-2" aria-label="Send typed question">
+            <button type="submit" className="btn-primary btn-sm flex items-center gap-2" aria-label="Send typed question">
               <Send size={18} aria-hidden="true" />
               Send
             </button>
             <button
               type="button"
-              className={`btn-ghost flex items-center gap-2 ${listening ? 'listening-pulse' : ''}`}
+              className={`btn-ghost btn-sm flex items-center gap-2 ${listening ? 'listening-pulse' : ''}`}
               aria-label={listening ? 'Finish speaking' : 'Start speaking'}
               onClick={() => (listening ? stt.stopListening() : startDialog())}
             >
               <Mic size={18} aria-hidden="true" />
               {listening ? 'Done' : 'Speak'}
             </button>
-            <button type="button" className="btn-ghost flex items-center gap-2" aria-label="Close and resume the lesson" onClick={() => { pauseLesson(); resumeLesson() }}>
+            <button type="button" className="btn-ghost btn-sm flex items-center gap-2" aria-label="Close and resume the lesson" onClick={() => { pauseLesson(); resumeLesson() }}>
               <Play size={18} aria-hidden="true" />
               Resume
             </button>
